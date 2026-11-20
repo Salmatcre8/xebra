@@ -1,6 +1,8 @@
 import { EVM_CHAINS } from "@xebra/sdk/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { notFound as aptosNotFound } from "../aptos/config";
 import {
+  notFound,
   parseSuiSendsToEvm,
   suiEvmDestinations,
   suiSendsToDomain,
@@ -69,5 +71,26 @@ describe("SUI_SENDS_TO_SOLANA", () => {
     vi.stubEnv("SUI_STELLAR_ENABLED", "");
     vi.stubEnv("SUI_SENDS_TO_SOLANA", "true");
     expect(suiSendsToSolana()).toBe(false);
+  });
+});
+
+describe("a route whose switch is off", () => {
+  it("answers a 404 that says it is switched off, and is never cached", async () => {
+    const res = notFound();
+    // Still 404: a client that only looks at the status behaves as it always has.
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({
+      error: "This route is switched off on this deployment.",
+      code: "feature_disabled",
+    });
+  });
+
+  it("answers the same from the Aptos routes, which keep their own copy", async () => {
+    const [sui, aptos] = [notFound(), aptosNotFound()];
+    expect(aptos.status).toBe(sui.status);
+    expect([...aptos.headers]).toEqual([...sui.headers]);
+    expect(await aptos.json()).toEqual(await sui.json());
   });
 });

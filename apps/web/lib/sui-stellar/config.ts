@@ -49,8 +49,16 @@ export function suiRpcUrl(): string {
   return process.env.SUI_RPC_URL?.trim() || "https://fullnode.mainnet.sui.io:443";
 }
 
+/**
+ * What a route answers while its switch is off. Still a 404, so a client that only checks the status
+ * carries on as before, but the body says this is a switch and not a mistyped URL, and `no-store`
+ * keeps a CDN or a browser from serving the refusal after the switch is turned on.
+ */
 export function notFound(): Response {
-  return Response.json({ error: "not available" }, { status: 404 });
+  return Response.json(
+    { error: "This route is switched off on this deployment.", code: "feature_disabled" },
+    { status: 404, headers: { "cache-control": "no-store" } },
+  );
 }
 
 /**
