@@ -81,6 +81,11 @@ Server environment (Vercel, read at request time, not build inputs):
 On the main bridge screen, Sui appears in the "Send from" picker when `SUI_STELLAR_ENABLED=true`
 (`/api/sui-stellar/config` tells the page). It is the same transfer as `/sui`, embedded in the plate.
 
+**A relayer secret that is not a secret seed counts as unset.** `SUI_STELLAR_RELAYER_SECRET` has to be a Stellar secret
+seed (`S...`, 56 characters). With a typo in it, or a public key pasted by mistake, the page is told there is no relayer and
+completion answers 503, exactly as when the variable is missing, and the server logs the problem once, never the value.
+Before, such a value left the config route saying `relayer: true` while every completion failed and asked to be retried.
+
 **Claiming without a relayer.** Once Circle has attested a burn, the page offers "Claim on Stellar": the server prepares the
 `mint_and_forward` call with the user's own Stellar wallet as the source (`POST /api/sui-stellar/claim`), the wallet signs,
 and the browser submits it. The user pays the fee (about 0.025 XLM). Any funded Stellar account may do this for any burn; the
