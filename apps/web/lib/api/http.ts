@@ -1,5 +1,6 @@
 import { ERROR_TYPE_BASE } from "@xebra/sdk";
 import { ApiError } from "./errors";
+import { TITLES } from "./host";
 import { extraToWire } from "./wire";
 
 /**
@@ -29,27 +30,12 @@ const MAX_BODY_BYTES = 16 * 1024;
 /** Fields whose problems are about the amount, which a caller fixes differently from a typo. */
 const AMOUNT_FIELDS = new Set(["amount", "maxTotalFee"]);
 
-const TITLES: Partial<Record<ApiError["code"], string>> = {
-  invalid_request: "Invalid request",
-  invalid_amount: "Invalid amount",
-  invalid_recipient: "Invalid recipient",
-  route_unavailable: "Route unavailable",
-  amount_below_minimum: "Amount below the minimum",
-  amount_above_maximum: "Amount above the maximum",
-  insufficient_balance: "Insufficient balance",
-  fee_above_limit: "Fee above your limit",
-  transaction_rejected: "Transaction would be rejected",
-  not_ready: "Not ready",
-  already_delivered: "Already delivered",
-  upstream_unavailable: "Upstream unavailable",
-  internal_error: "Internal error",
-};
-
 export function problem(err: ApiError, headers: Record<string, string> = {}): Response {
   return Response.json(
     {
       type: `${ERROR_TYPE_BASE}${err.code}`,
-      title: TITLES[err.code] ?? err.code,
+      // Every code has a title (`host.ts`, where the middleware can read it too).
+      title: TITLES[err.code],
       status: err.status,
       detail: err.detail,
       code: err.code,

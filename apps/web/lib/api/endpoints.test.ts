@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import {
   ClaimBuildSchema,
+  ERROR_CODES,
   ProblemSchema,
   QuoteSchema,
   RoutesSchema,
@@ -18,6 +20,7 @@ import {
 } from "../../app/v1/[[...rest]]/route";
 import type { Deps } from "./deps";
 import { endpoints } from "./endpoints";
+import { ApiError } from "./errors";
 import {
   RECIPIENT,
   SENDER,
@@ -28,7 +31,8 @@ import {
   deps,
   health,
 } from "./fakes";
-import { preflight } from "./http";
+import { TITLES, methodNotAllowed, notFound } from "./host";
+import { preflight, problem } from "./http";
 import { createService } from "./service";
 
 const BASE = "https://api.xebra.exchange/v1";
@@ -284,5 +288,52 @@ describe("CORS", () => {
     const bad = await api().quote(get("/quote?from=x"));
     expect(ok.headers.get("access-control-allow-origin")).toBe("*");
     expect(bad.headers.get("access-control-allow-origin")).toBe("*");
+  });
+});
+
+describe("problem titles", () => {
+  /** What the docs' error table says of each code the API answers with: its status and title. */
+  const documented = new Map(
+    readFileSync(new URL("../../../docs/content/docs/errors/index.mdx", import.meta.url), "utf8")
+      .split(/\r?\n/)
+      .flatMap((row) => {
+        const cells = row.match(/^\| \[`(\w+)`\]\(\/docs\/errors\/\w+\) \| (\d+) \| ([^|]+?) \|/);
+        return cells ? [[cells[1], { status: Number(cells[2]), title: cells[3] }] as const] : [];
+      }),
+  );
+
+  it("gives every code the title and status its docs page is listed under", async () => {
+    // The table and the SDK name the same codes, so neither can gain one the other lacks.
+    expect([...documented.keys()].sort()).toEqual([...ERROR_CODES].sort());
+    for (const code of ERROR_CODES) {
+      const body = await problemOf(problem(new ApiError(code, "A sentence for a person.")));
+      expect(body.title, code).toBe(documented.get(code)?.title);
+      expect(body.status, code).toBe(documented.get(code)?.status);
+      // The fallback this replaced: a code with no title used to be shown as itself.
+      expect(body.title, code).not.toBe(code);
+    }
+  });
+
+  it("names the three codes that had no title", async () => {
+    for (const [code, title] of [
+      ["unauthorized", "Unauthorized"],
+      ["not_found", "Not found"],
+      ["rate_limited", "Rate limited"],
+    ] as const) {
+      expect((await problemOf(problem(new ApiError(code, "A sentence.")))).title).toBe(title);
+    }
+  });
+
+  it("says the same from the middleware as from an endpoint", async () => {
+    const detail = "The API lives under /v1. See https://docs.xebra.exchange/api.";
+    expect(await notFound(detail).json()).toEqual(
+      await problem(new ApiError("not_found", detail)).json(),
+    );
+    // A 405 has no code of its own, so it is `invalid_request` under another status: same title.
+    const wrongMethod = await problemOf(methodNotAllowed("GET", ["POST", "OPTIONS"]));
+    expect(wrongMethod.title).toBe(TITLES.invalid_request);
+    expect(wrongMethod.title).toBe(
+      (await problemOf(problem(new ApiError("invalid_request", "A sentence.")))).title,
+    );
   });
 });
