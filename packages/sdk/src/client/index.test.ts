@@ -207,3 +207,123 @@ describe("XebraError and retryability", () => {
     expect(baseErr.retryable).toBe(false);
   });
 });
+
+/** What a call rejected with. Fails, rather than passing by accident, when the call succeeds. */
+async function failure(call: Promise<unknown>): Promise<XebraApiError> {
+  try {
+    await call;
+  } catch (err) {
+    return err as XebraApiError;
+  }
+  throw new Error("expected the call to reject, and it did not");
+}
+
+describe("a body that stops arriving", () => {
+  const TX = "a".repeat(64);
+  /** A 200 whose headers arrive and whose body then stalls, until the request is aborted. */
+  const stalled = (signal: AbortSignal | null | undefined) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"routes":['));
+          signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  const soon = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("is a timeout when the client's clock runs out, not a 200 that was not JSON", async () => {
+    const client = createXebraClient({
+      timeoutMs: 20,
+      fetch: async (_url, init) => stalled(init?.signal),
+    });
+    const err = await failure(client.routes());
+    expect(err).toBeInstanceOf(XebraApiError);
+    expect(err).toMatchObject({
+      code: "timeout",
+      status: 0,
+      retryable: true,
+      detail: "No answer within 20 ms.",
+    });
+    // What the read itself failed with is kept, for whoever reads the stack.
+    expect(err.cause).toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("rejects with the caller's own reason when the caller aborts", async () => {
+    const client = createXebraClient({ fetch: async (_url, init) => stalled(init?.signal) });
+    const caller = new AbortController();
+    const reason = new Error("the user left the page");
+    const pending = client.getTransfer("stellar", TX, caller.signal);
+    // Let the headers arrive first, so the abort lands while the body is being read.
+    await soon(5);
+    caller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it("is the caller's abort, not the timeout, when both have happened", async () => {
+    // A body that fails only when told to, so both signals can fire before the read ends.
+    let fail: (why: unknown) => void = () => {};
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        fail = (why) => controller.error(why);
+      },
+    });
+    const client = createXebraClient({
+      timeoutMs: 10,
+      fetch: async () => new Response(body, { status: 200 }),
+    });
+    const caller = new AbortController();
+    const reason = new Error("the user left the page");
+    const pending = client.getTransfer("stellar", TX, caller.signal);
+    await soon(40);
+    caller.abort(reason);
+    fail(new Error("socket closed"));
+    await expect(pending).rejects.toBe(reason);
+  });
+});
+
+describe("the error behind an error", () => {
+  it("keeps what could not be read as the cause of an invalid_response", async () => {
+    const answering = (res: () => Response) =>
+      failure(createXebraClient({ fetch: async () => res() }).routes());
+
+    const notJson = await answering(() => new Response("<html>", { status: 502 }));
+    expect(notJson).toMatchObject({ code: "invalid_response", status: 502 });
+    expect(notJson.cause).toBeInstanceOf(SyntaxError);
+
+    // A 200 of the wrong shape, and a 500 that is not a problem: both carry what did not match.
+    for (const res of [() => json(200, { routes: "nope" }), () => json(500, { oops: true })]) {
+      const err = await answering(res);
+      expect(err).toMatchObject({ code: "invalid_response" });
+      expect(err.cause).toMatchObject({ issues: expect.any(Array) });
+    }
+  });
+
+  it("says what the last poll failed with when a wait runs out with the API unreachable", async () => {
+    const down = new TypeError("fetch failed");
+    const client = createXebraClient({
+      fetch: async () => {
+        throw down;
+      },
+    });
+    const err = await failure(
+      client.waitForDelivery("stellar", "a".repeat(64), { intervalMs: 5, timeoutMs: 20 }),
+    );
+    expect(err).toMatchObject({ code: "wait_timeout", extra: {} });
+    expect(err.cause).toMatchObject({ code: "network_error", cause: down });
+  });
+
+  it("gives a wait that ran out no cause when the last poll was answered", async () => {
+    // A 503 first: a failure that a later answer supersedes must not be reported as the cause.
+    const answers = [problem(503, "upstream_unavailable")];
+    const client = createXebraClient({
+      fetch: async () => answers.shift() ?? json(200, STATUS("pending")),
+    });
+    const err = await failure(
+      client.waitForDelivery("stellar", "a".repeat(64), { intervalMs: 5, timeoutMs: 30 }),
+    );
+    expect(err).toMatchObject({ code: "wait_timeout", extra: { lastStatus: "pending" } });
+    expect(err.cause).toBeUndefined();
+  });
+});

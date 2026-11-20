@@ -71,7 +71,7 @@ export interface XebraClientOptions {
 }
 
 interface Schema<T> {
-  safeParse(v: unknown): { success: true; data: T } | { success: false };
+  safeParse(v: unknown): { success: true; data: T } | { success: false; error?: unknown };
 }
 
 /** States after which a transfer will not change without someone acting. */
@@ -154,6 +154,17 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
     try {
       body = await res.json();
     } catch (err) {
+      // The headers have arrived but the body has not, so either signal can still end the read.
+      // An abort is not an answer: report it as what it is, not as a 200 that was not JSON.
+      if (init.signal?.aborted) throw init.signal.reason;
+      if (timeout.aborted)
+        throw new XebraApiError(
+          0,
+          "timeout",
+          `No answer within ${timeoutMs} ms.`,
+          {},
+          { cause: err },
+        );
       throw new XebraApiError(
         res.status,
         "invalid_response",
@@ -165,7 +176,13 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
     if (!res.ok) {
       const p = ProblemSchema.safeParse(body);
       if (!p.success) {
-        throw new XebraApiError(res.status, "invalid_response", `The API answered ${res.status}.`);
+        throw new XebraApiError(
+          res.status,
+          "invalid_response",
+          `The API answered ${res.status}.`,
+          {},
+          { cause: p.error },
+        );
       }
       const { type: _type, title: _title, status, detail, code, ...extra } = p.data;
       throw new XebraApiError(status, code as ApiErrorCode, detail, extra);
@@ -176,6 +193,8 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
         res.status,
         "invalid_response",
         "The API's answer did not match this SDK's schema.",
+        {},
+        { cause: parsed.error },
       );
     }
     return parsed.data;
@@ -229,10 +248,14 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
       const interval = o.intervalMs ?? 5_000;
       const deadline = Date.now() + (o.timeoutMs ?? 30 * 60_000);
       let lastStatus: TransferStatus | null = null;
+      // What the last poll failed with, if it failed: a wait that ends while the API cannot be
+      // reached should say so, not only that the transfer did not settle.
+      let lastFailure: unknown;
       for (;;) {
         try {
           const status = await getTransfer(chain, tx, o.signal);
           lastStatus = status;
+          lastFailure = undefined;
           if (SETTLED.has(status.state)) return status;
         } catch (err) {
           const transient =
@@ -242,6 +265,7 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
               err.code === "network_error" ||
               err.code === "timeout");
           if (!transient) throw err;
+          lastFailure = err;
         }
         if (Date.now() + interval > deadline) {
           throw new XebraApiError(
@@ -249,6 +273,7 @@ export function createXebraClient(opts: XebraClientOptions = {}) {
             "wait_timeout",
             "The transfer did not settle in time; it may still. Ask again later.",
             lastStatus ? { lastStatus: lastStatus.state } : {},
+            { cause: lastFailure },
           );
         }
         await sleep(interval, o.signal);
